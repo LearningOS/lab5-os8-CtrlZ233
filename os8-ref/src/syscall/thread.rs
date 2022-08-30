@@ -31,13 +31,8 @@ pub fn sys_thread_create(entry: usize, arg: usize) -> isize {
     );
     (*new_task_trap_cx).x[10] = arg;
 
-    let mut process_inner = process.inner_exclusive_access();
     // add new thread to current process
-    let tasks = &mut process_inner.tasks;
-    while tasks.len() < new_task_tid + 1 {
-        tasks.push(None);
-    }
-    tasks[new_task_tid] = Some(Arc::clone(&new_task));
+    process.add_new_task(new_task_tid, new_task.clone());
     // add new task to scheduler
     add_task(Arc::clone(&new_task));
     new_task_tid as isize

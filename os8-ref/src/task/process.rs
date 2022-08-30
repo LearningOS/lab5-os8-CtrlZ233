@@ -9,6 +9,7 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefMut;
+use crate::config::{MAX_MUTEX_NUM, MAX_SEMA_NUM};
 
 pub struct ProcessControlBlock {
     // immutable
@@ -20,6 +21,7 @@ pub struct ProcessControlBlock {
 // LAB5 HINT: you may add data structures for deadlock detection here
 pub struct ProcessControlBlockInner {
     pub is_zombie: bool,
+    pub is_deadlock_detect_enable: bool,
     pub memory_set: MemorySet,
     pub parent: Option<Weak<ProcessControlBlock>>,
     pub children: Vec<Arc<ProcessControlBlock>>,
@@ -30,6 +32,12 @@ pub struct ProcessControlBlockInner {
     pub mutex_list: Vec<Option<Arc<dyn Mutex>>>,
     pub semaphore_list: Vec<Option<Arc<Semaphore>>>,
     pub condvar_list: Vec<Option<Arc<Condvar>>>,
+    pub mutex_available: Vec<usize>,
+    pub semaphore_available: Vec<usize>,
+    pub mutex_need: Vec<[usize; MAX_MUTEX_NUM]>,
+    pub semaphore_need: Vec<[usize; MAX_SEMA_NUM]>,
+    pub mutex_alloc: Vec<[usize; MAX_MUTEX_NUM]>,
+    pub semaphore_alloc: Vec<[usize; MAX_SEMA_NUM]>,
 }
 
 impl ProcessControlBlockInner {
@@ -80,6 +88,7 @@ impl ProcessControlBlock {
             inner: unsafe {
                 UPSafeCell::new(ProcessControlBlockInner {
                     is_zombie: false,
+                    is_deadlock_detect_enable: false,
                     memory_set,
                     parent: None,
                     children: Vec::new(),
@@ -97,6 +106,12 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    mutex_available: Vec::new(),
+                    semaphore_available: Vec::new(),
+                    mutex_need: Vec::new(),
+                    semaphore_need: Vec::new(),
+                    mutex_alloc: Vec::new(),
+                    semaphore_alloc: Vec::new(),
                 })
             },
         });
@@ -122,6 +137,10 @@ impl ProcessControlBlock {
         // add main thread to the process
         let mut process_inner = process.inner_exclusive_access();
         process_inner.tasks.push(Some(Arc::clone(&task)));
+        process_inner.mutex_need.push([0; MAX_MUTEX_NUM]);
+        process_inner.mutex_alloc.push([0; MAX_MUTEX_NUM]);
+        process_inner.semaphore_need.push([0; MAX_SEMA_NUM]);
+        process_inner.semaphore_alloc.push([0; MAX_SEMA_NUM]);
         drop(process_inner);
         // add main thread to scheduler
         add_task(task);
@@ -208,6 +227,7 @@ impl ProcessControlBlock {
             inner: unsafe {
                 UPSafeCell::new(ProcessControlBlockInner {
                     is_zombie: false,
+                    is_deadlock_detect_enable: parent.is_deadlock_detect_enable,
                     memory_set,
                     parent: Some(Arc::downgrade(self)),
                     children: Vec::new(),
@@ -218,6 +238,12 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    mutex_available: Vec::new(),
+                    semaphore_available: Vec::new(),
+                    mutex_need: Vec::new(),
+                    semaphore_need: Vec::new(),
+                    mutex_alloc: Vec::new(),
+                    semaphore_alloc: Vec::new(),
                 })
             },
         });
@@ -240,6 +266,10 @@ impl ProcessControlBlock {
         // attach task to child process
         let mut child_inner = child.inner_exclusive_access();
         child_inner.tasks.push(Some(Arc::clone(&task)));
+        child_inner.mutex_need.push([0; MAX_MUTEX_NUM]);
+        child_inner.mutex_alloc.push([0; MAX_MUTEX_NUM]);
+        child_inner.semaphore_need.push([0; MAX_SEMA_NUM]);
+        child_inner.semaphore_alloc.push([0; MAX_SEMA_NUM]);
         drop(child_inner);
         // modify kernel_stack_top in trap_cx of this thread
         let task_inner = task.inner_exclusive_access();
@@ -262,6 +292,7 @@ impl ProcessControlBlock {
             inner: unsafe {
                 UPSafeCell::new(ProcessControlBlockInner {
                     is_zombie: false,
+                    is_deadlock_detect_enable: false,
                     memory_set: memory_set,
                     parent: None,
                     children: Vec::new(),
@@ -272,9 +303,108 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    mutex_available: Vec::new(),
+                    semaphore_available: Vec::new(),
+                    mutex_need: Vec::new(),
+                    semaphore_need: Vec::new(),
+                    mutex_alloc: Vec::new(),
+                    semaphore_alloc: Vec::new(),
                 })
             },
         });
         process
+    }
+    pub fn enable_deadlock_detect(&self, is_enable: bool) {
+        let mut inner = self.inner_exclusive_access();
+        inner.is_deadlock_detect_enable = is_enable;
+    }
+
+    pub fn mutex_deadlock_detect(&self, mutex_id: usize, tid: usize) -> bool {
+        let mut inner = self.inner_exclusive_access();
+        if !inner.is_deadlock_detect_enable {
+            return false;
+        }
+        let task_len = inner.tasks.len();
+        let mut work = inner.mutex_available.clone();
+        let mut finish: Vec<bool> = vec![false; task_len];
+        let mut need = inner.mutex_need.clone();
+        need[tid][mutex_id] = 1;
+        let mut change: bool = true;
+        while change {
+            change = false;
+            for i in 0..task_len {
+                if finish[i] == false && work[mutex_id] >= need[i][mutex_id] {
+                    work[mutex_id] += inner.mutex_alloc[i][mutex_id];
+                    finish[i] = true;
+                    change = true;
+                }
+            }
+        }
+
+        for i in 0..task_len {
+            if finish[i] == false {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    pub fn sema_dealock_detect(&self, sema_id: usize, tid: usize) -> bool {
+        let mut inner = self.inner_exclusive_access();
+        if !inner.is_deadlock_detect_enable {
+            return false;
+        }
+        let task_len = inner.tasks.len();
+        let mut work = inner.semaphore_available.clone();
+        let mut finish: Vec<bool> = vec![false; task_len];
+        let mut need = inner.semaphore_need.clone();
+        need[tid][sema_id] += 1;
+
+        let mut change = true;
+        while change {
+            change = false;
+            for i in 0..task_len {
+                let mut flag = true;
+                for j in 0..work.len() {
+                    if work[j] < need[i][j] {
+                        flag = false;
+                        break;
+                    }
+                }
+
+                if finish[i] == false && flag {
+                    for j in 0..work.len() {
+                        work[j] += inner.semaphore_alloc[i][j];
+                    }
+                    finish[i] = true;
+                    change = true;
+                }
+            }
+        }
+
+        for i in 0..task_len {
+            if finish[i] == false {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    pub fn add_new_task(&self, new_tid: usize, new_task: Arc<TaskControlBlock>) {
+        let mut inner = self.inner_exclusive_access();
+        while inner.tasks.len() < new_tid + 1 {
+            inner.tasks.push(None);
+            inner.mutex_need.push([0; MAX_MUTEX_NUM]);
+            inner.mutex_alloc.push([0; MAX_MUTEX_NUM]);
+            inner.semaphore_need.push([0; MAX_SEMA_NUM]);
+            inner.semaphore_alloc.push([0; MAX_SEMA_NUM]);
+        }
+        inner.tasks[new_tid] = Some(Arc::clone(&new_task));
+        inner.mutex_need[new_tid] = [0; MAX_MUTEX_NUM];
+        inner.mutex_alloc[new_tid] = [0; MAX_MUTEX_NUM];
+        inner.semaphore_need[new_tid] = [0; MAX_SEMA_NUM];
+        inner.semaphore_alloc[new_tid] = [0; MAX_SEMA_NUM];
     }
 }

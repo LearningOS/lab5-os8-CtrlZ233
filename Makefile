@@ -56,7 +56,7 @@ test7: setup
 	cd ${DIR}/ci-user && make test CHAPTER=7
 
 test8: setup
-	cp -r os8 ${DIR}/os
+	cp -r os8-ref ${DIR}/os
 	cd ${DIR}/ci-user && make test CHAPTER=8
 
 clean:
